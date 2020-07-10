@@ -22,7 +22,7 @@ from jira import JIRA, __version__
 
 import configparser
 from sys import exit
-from magics import JiraMagics
+from jira.magics import JiraMagics
 
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".jira-python", "jirashell.ini")
@@ -302,8 +302,8 @@ def get_config():
 def handle_basic_auth(auth, server):
     if auth.get("password"):
         password = auth["password"]
-        if input("Would you like to remember password in OS keyring? (y/n)") == "y":
-            keyring.set_password(server, auth["username"], password)
+        #if input("Would you like to remember password in OS keyring? (y/n)") == "y":
+        #    keyring.set_password(server, auth["username"], password)
     else:
         print("Getting password from keyring...")
         password = keyring.get_password(server, auth["username"])
