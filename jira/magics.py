@@ -1,4 +1,6 @@
 import logging
+import functools
+import sys
 from IPython.core.magic import (Magics, magics_class, line_magic,
                                 cell_magic, line_cell_magic)
 import re
@@ -12,12 +14,26 @@ from IPython.core.magic_arguments import (
     parse_argstring,
 )
 import shlex
-from docopt import docopt
+from docopt import docopt, DocoptExit
 from subprocess import Popen
 from pygments.lexers import YamlLexer
 from pygments.formatters import Terminal256Formatter
 from pygments import highlight
+from jira.exceptions import JIRAError
 
+
+def docoptwrapper(function):
+    """
+    A decorator that wraps the passed in function and logs 
+    exceptions should one occur
+    """
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except (SystemExit, DocoptExit) as e:
+            print(getattr(e, 'usage', ''))
+    return wrapper
 
 
 @magics_class
@@ -32,6 +48,29 @@ class JiraMagics(Magics):
         self.load_sprints()
         if shell:
             self.shell.user_ns['boards'] = self.boards
+        self.USERS = {
+            "sue": "5b5587607501ba2d6ea64178",
+            "john": "5ae2734c424d6b2e29a09fd4",
+            "dl": "5b8894114d21642beb80e399",
+            "vinh": "557058:3dd1d88e-2649-473a-9e8b-0671237c77dc",
+            "joao": "5d895e4a4831170dbc8f0e77",
+            "narsing": "5cf4ba8198b1560e859973b3",
+            "ganesh": "5cf4ba8198b1560e859973b3",
+            "steven": "557058:61e4c007-f72f-4500-870e-594e73520785",
+        }
+        self.FIELD_MAP = {
+            'key': 'key',
+            'summary': 'fields.summary',
+            'description': 'fields.description',
+            'reporter': 'fields.reporter.displayName',
+            'assignee': 'fields.assignee.displayName',
+            'status': 'fields.status.name',
+            'sprint': 'fields.currentSprint',
+            'labels': 'fields.labels',
+            'project': 'fields.project.key',
+            'issuetype': 'fields.issuetype.name',
+            'tester': 'customfield_10500.displayName',
+        }
 
     @line_magic
     def load_sprints(self, line=None):
@@ -54,7 +93,35 @@ class JiraMagics(Magics):
 
     @line_magic
     def sprints(self, line=None):
-        pprint(self.boards)
+        args = docopt(
+            """Get sprints
+
+            Usage:
+                sprints [options]
+
+                -p --project=<project>  Project to use [default: POINTZI]
+                -a --assignee=<assignee>  Project to use [default: currentUser()]
+                -t --issuetype=<issuetype>  Issuetype to use [default: task]
+            """,
+            argv=shlex.split(line),
+        )
+        results = []
+        sprint = self._current_sprint()
+        args['sprintid'] = sprint.id
+        args['assignee'] = self.resolve_user(args.get('--assignee'))
+        query = 'sprint = {sprintid} AND status in ("In Progress", Open) AND assignee = {assignee}'.format(
+            **args)
+        print(query)
+        for cnt, issue in enumerate(self.jira.search_issues(query, maxResults=500)):
+            results.append(
+                [
+                    cnt,
+                    issue.key,
+                    issue.fields.summary,
+                ]
+            )
+        print("Current Sprint : %s %s" % (sprint, sprint.id))
+        print(tabulate(results))
 
     @line_magic
     def search(self, line):
@@ -67,6 +134,7 @@ class JiraMagics(Magics):
                     issue.key,
                     issue.fields.summary,
                     ",".join(self.get_sprint(issue)),
+                    ",".join(issue.fields.labels),
                 ]
             )
 
@@ -128,48 +196,56 @@ class JiraMagics(Magics):
 
     def pprint(self, jissue):
         issue = {}
-        FIELD_MAP = {
-            'key': 'key',
-            'summary': 'fields.summary',
-            'description': 'fields.description',
-            'reporter': 'fields.reporter.displayName',
-            'assignee': 'fields.assignee.displayName',
-            'status': 'fields.status.name',
-            'sprint': 'fields.currentSprint',
-        }
-        for field, source in FIELD_MAP.items():
+        for field, source in self.FIELD_MAP.items():
             issue[field] = jmespath.search(source, jissue.raw)
 
         yml = yaml.dump(issue)
         print(highlight(yml, YamlLexer(), Terminal256Formatter()))
 
+    def resolve_user(self, user):
+        return self.USERS.get(user, user)
+
     @line_magic
-    def create_task(self, line=''):
+    @docoptwrapper
+    def create(self, line=''):
+        ISSUE_TYPES = {
+            "task": "Task",
+            "bug": "Bug",
+            "feature": "New Feature",
+            "support": "Support",
+            "subtask": "Sub-Task",
+            "epic": "Epic",
+            "story": "Story",
+        }
         args = docopt(
-            """ Create a Task
+            """Create an issue
 
             Usage:
-            create_task <summary> <description> [--project=<project>|--assignee=<assignee>]
+                create [options] <summary> <description>
 
-            Options:
-            --project=<project>  Project to use [default: POINTZI]
-            --assigee=<assignee>  Project to use [default: currentUser()]
+                -p --project=<project>  Project to use [default: POINTZI]
+                -a --assignee=<assignee>  Project to use [default: currentUser()]
+                -t --issuetype=<issuetype>  Issuetype to use [default: task]
+                -e --epicname=<epicname> Epic name
             """,
             argv=shlex.split(line),
         )
+        issuetype = ISSUE_TYPES[args['--issuetype']]
         issue = {
             "summary": args['<summary>'],
             "description": args['<description>'],
             "project": args['--project'],
-            "issuetype": "Task",
+            "issuetype": issuetype,
         }
         if args['--assignee']:
-            issue['assignee'] = args['--assignee']
+            issue['assignee'] = self.resolve_user(args['--assignee'])
+        if args['--issuetype'] == 'epic':
+            issue['customfield_10018'] = args['--epicname']
         issue = self.jira.create_issue(issue)
-        import ipdb;ipdb.set_trace()
         self.pprint(issue)
 
     @line_magic
+    @docoptwrapper
     def open(self, line=""):
         args = docopt(
             """ Open issue in browser
@@ -225,9 +301,55 @@ class JiraMagics(Magics):
 
     @line_magic
     def delete(self, line=''):
-        self.jira.issue(line).delete()
+        args = docopt(
+            """Delete issue
+            Usage:
+                delete <id>
+            """,
+            argv=shlex.split(line)
+        )
+        self.jira.issue(args['<id>']).delete()
 
     @line_magic
+    @docoptwrapper
+    def clone(self, line=''):
+        CLONE_FIELDS = dict(self.FIELD_MAP)
+        CLONE_FIELDS.pop('sprint')
+        CLONE_FIELDS.pop('status')
+        CLONE_FIELDS.pop('key')
+        CLONE_FIELDS.pop('reporter')
+        args = docopt(
+            """Cone issue
+            Usage:
+                clone <id>
+            """,
+            argv=shlex.split(line)
+        )
+        i0 = self.jira.issue(args['<id>'])
+        issue = {}
+        for field, source in CLONE_FIELDS.items():
+            issue[field] = jmespath.search(source, i0.raw)
+        self.pprint(self.jira.create_issue(issue))
+
+    @line_magic
+    @docoptwrapper
+    def move(self, line=''):
+        args = docopt(
+            """Move issue to another project
+            Usage:
+                move <id> <project>
+            """,
+            argv=shlex.split(line)
+        )
+        i0 = self.jira.issue(args['<id>'])
+        issue = {}
+        for field, source in self.FIELD_MAP.items():
+            issue[field] = jmespath.search(source, i0.raw)
+        issue['project'] = args['<project>']
+        self.pprint(self.jira.create_issue(**issue))
+
+    @line_magic
+    @docoptwrapper
     def assign(self, line=''):
         args = docopt(
             """Assign issue
@@ -236,24 +358,14 @@ class JiraMagics(Magics):
             """,
             argv=shlex.split(line)
         )
-        USERS = {
-            "sue": "5b5587607501ba2d6ea64178",
-            "john": "5ae2734c424d6b2e29a09fd4",
-            "dl": "5b8894114d21642beb80e399",
-            "vinh": "557058:3dd1d88e-2649-473a-9e8b-0671237c77dc",
-            "joao": "5d895e4a4831170dbc8f0e77",
-            "narsing": "5cf4ba8198b1560e859973b3",
-            "ganesh": "5cf4ba8198b1560e859973b3",
-            "steven": "557058:61e4c007-f72f-4500-870e-594e73520785",
-        }
-        
         print(
             self.jira.assign_issue(
                 self.jira.issue(args['<id>']),
-                account_id=USERS.get(args['<nick>'], args['<nick>'])
+                account_id=self.USERS.get(args['<nick>'], args['<nick>'])
             )
         )
     @line_magic
+    @docoptwrapper
     def comment(self, line=''):
         args = docopt(
             """comment on issue
@@ -262,10 +374,12 @@ class JiraMagics(Magics):
             """,
             argv=shlex.split(line)
         )
+        regex = re.compile(r"(?<![@\w])@(\w{1,25})")
         pprint(
             self.jira.add_comment(
                 self.jira.issue(args['<id>']),
-                args['<comment>'],
+                regex.sub(lambda x: "[~accountid:%s]" % self.USERS.get(
+                    x.groups()[0], x.groups()[0]), args['<comment>']),
             )
         )
     def print_comment(self, comment):
@@ -284,6 +398,7 @@ class JiraMagics(Magics):
 
 
     @line_magic
+    @docoptwrapper
     def comments(self, line=''):
         args = docopt(
             """get issue comments
@@ -302,6 +417,7 @@ class JiraMagics(Magics):
         return self.search('reporter in (currentUser()) ORDER BY updated DESC, created DESC, lastViewed DESC')
 
     @line_magic
+    @docoptwrapper
     def transition(self, line=''):
         TRANSITIONS = {
             'open': 'Open',
@@ -309,18 +425,51 @@ class JiraMagics(Magics):
             'testing': '31',
             'qa': '211', # Waiting for QA
             'start':  '11', # Start Development
+            'analysis': '261',
+            'wontfix': '271',
         }
         args = docopt(
             """transition issue to %s
             Usage:
-                assign <id> <transition> [<comment>]
+                assign <id> <transition> <comment>
             """ % TRANSITIONS,
             argv=shlex.split(line)
         )
-        print(
+        print((
             self.jira.transition_issue(
                 self.jira.issue(args['<id>']),
                 TRANSITIONS[args['<transition>']],
                 comment=args.get('<comment>'),
+            ),
+            self.jira.add_comment(
+                self.jira.issue(args['<id>']),
+                args['<comment>'],
             )
+        ))
+
+    @line_magic
+    @docoptwrapper
+    def label(self, line=''):
+        args = docopt(
+            """label issue with list of labels eg: sdk,performance
+            Usage:
+                label <id> <labels>
+            """,
+            argv=shlex.split(line)
         )
+        i0 = self.jira.issue(args['<id>'])
+        i0.fields.labels.extend(args['<labels>'].split(','))
+        print(
+            i0.update(fields={'labels': i0.fields.labels}))
+
+    @line_magic
+    @docoptwrapper
+    def add_to_epic(self, line=''):
+        args = docopt(
+            """add list of issues to epic
+            Usage:
+                label <epicid> <ids> ...
+            """,
+            argv=shlex.split(line)
+        )
+        print(self.jira.add_issues_to_epic(args['<epicid>'], args['<ids>']))
