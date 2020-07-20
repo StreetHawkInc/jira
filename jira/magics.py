@@ -169,7 +169,7 @@ class JiraMagics(Magics):
     def mysprint(self, line=''):
         results = []
         sprint = self._current_sprint()
-        query = 'sprint = %s AND status in ("In Progress", Open) AND assignee = currentUser()' % sprint.id
+        query = 'sprint = %s AND status in ("In Progress", "Open") AND assignee = currentUser()' % sprint.id
         print(query)
         if line:
             query += ' AND ' + line
@@ -473,3 +473,29 @@ class JiraMagics(Magics):
             argv=shlex.split(line)
         )
         print(self.jira.add_issues_to_epic(args['<epicid>'], args['<ids>']))
+
+    @line_magic
+    @docoptwrapper
+    def add_to_sprint(self, line=""):
+        args = docopt(
+            """add list of issues to sprint
+            Usage:
+                label <sprint> <ids> ...
+
+            <sprint>    Can be a sprint id or name or literal 'current' for current sprint
+            """,
+            argv=shlex.split(line)
+        )
+        sprint = args['<sprint>']
+        if sprint == 'current':
+            sprint = self._current_sprint().id
+        elif sprint.isnumeric():
+            sprint = int(sprint)
+        else:
+            for board in self.boards.values():
+                for sprintname, sprintdata in board.items():
+                    if sprintname == sprint:
+                        sprint = sprintdata.id
+                        print("Sprint name:%s id:%s" % (sprintname, sprint))
+                        break
+        print(self.jira.add_issues_to_sprint(sprint, args['<ids>']))
